@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+
+# rslink - A CLI tool to copy/move folders with optional symlink creation
+# Usage: rslink [options] <source> <destination>
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Default options
+MOVE=false
+CREATE_SYMLINK=true
+DELETE_AFTER=false
+DRY_RUN=false
+VERBOSE=false
+RSYNC_OPTS="-a"
+
+show_help() {
+    cat << EOF
+rslink - Copy or move folders using rsync with optional symlink creation
+
+USAGE:
+    rslink [OPTIONS] <source> <destination>
+
+OPTIONS:
+    -m, --move           Move mode: remove source after successful transfer
+    -s, --symlink        Create symlink at source pointing to destination (default: true)
+    --no-symlink         Don't create symlink
+    -d, --delete         Delete source after transfer (alias for --move)
+    -n, --dry-run        Show what would be done without making changes
+    -v, --verbose        Show detailed output
+    -h, --help           Show this help message
+
+EXAMPLES:
+    # Copy folder and create symlink
+    rslink /path/to/source /path/to/destination
+
+    # Move folder (delete source) and create symlink
+    rslink --move /path/to/source /path/to/destination
+
+    # Copy without creating symlink
+    rslink --no-symlink /path/to/source /path/to/destination
+
+    # Dry run to see what would happen
+    rslink --dry-run /path/to/source /path/to/destination
+
+EOF
+}
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+log_verbose() {
+    if [[ "$VERBOSE" == true ]]; then
+        echo -e "[VERBOSE] $1"
+    fi
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -m|--move|-d|--delete)
+            MOVE=true
+            DELETE_AFTER=true
+            shift
+            ;;
+        -s|--symlink)
+            CREATE_SYMLINK=true
+            shift
+            ;;
+        --no-symlink)
+            CREATE_SYMLINK=false
+            shift
+            ;;
+        -n|--dry-run)
+            DRY_RUN=true
+            RSYNC_OPTS="$RSYNC_OPTS --dry-run"
+            shift
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            RSYNC_OPTS="$RSYNC_OPTS -v"
+            shift
+            ;;
+        -*)
+            log_error "Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# Check remaining arguments
+if [[ $# -lt 2 ]]; then
+    log_error "Source and destination are required"
+    show_help
+    exit 1
+fi
+
+SOURCE="$1"
+DEST="$2"
+
+# Resolve absolute paths
+SOURCE_ABS="$(cd "$SOURCE" 2>/dev/null && pwd)" || SOURCE_ABS="$SOURCE"
+DEST_ABS="$(cd "$(dirname "$DEST")" 2>/dev/null && pwd)/$(basename "$DEST")" || DEST_ABS="$DEST"
+
+# Validate source exists
+if [[ ! -e "$SOURCE" ]]; then
+    log_error "Source does not exist: $SOURCE"
+    exit 1
+fi
+
+# Get source basename for destination
+SOURCE_BASENAME="$(basename "$SOURCE")"
+
+# If destination is a directory, append source basename
+if [[ -d "$DEST" ]]; then
+    DEST_FINAL="$DEST/$SOURCE_BASENAME"
+else
+    DEST_FINAL="$DEST"
+fi
+
+DEST_FINAL_ABS="$(cd "$(dirname "$DEST_FINAL")" 2>/dev/null && pwd)/$(basename "$DEST_FINAL")" || DEST_FINAL="$DEST_FINAL"
+
+# Show plan
+echo "────────────────────────────────────────────"
+echo "Source:      $SOURCE"
+echo "Destination: $DEST_FINAL"
+echo "────────────────────────────────────────────"
+echo "Mode:        $([ "$MOVE" == true ] && echo "MOVE (delete source)" || echo "COPY")"
+echo "Symlink:     $([ "$CREATE_SYMLINK == true" ] && echo "Yes" || echo "No")"
+echo "Dry run:     $DRY_RUN"
+echo "────────────────────────────────────────────"
+
+# Run rsync
+log_info "Starting rsync..."
+log_verbose "Command: rsync $RSYNC_OPTS \"$SOURCE\" \"$DEST_FINAL\""
+
+if rsync $RSYNC_OPTS "$SOURCE" "$DEST_FINAL"; then
+    log_info "Rsync completed successfully"
+else
+    log_error "Rsync failed"
+    exit 1
+fi
+
+# Handle move/delete and symlink creation
+if [[ "$DRY_RUN" == false ]]; then
+    # Move mode: remove source
+    if [[ "$MOVE" == true ]]; then
+        log_info "Removing source: $SOURCE"
+        if [[ -d "$SOURCE" ]]; then
+            rm -rf "$SOURCE"
+        else
+            rm -f "$SOURCE"
+        fi
+    fi
+
+    # Create symlink at source location
+    if [[ "$CREATE_SYMLINK" == true ]]; then
+        # Check if source still exists
+        if [[ -e "$SOURCE" ]]; then
+            log_warn "Source still exists, skipping symlink creation"
+            log_warn "Remove source first or use --move"
+        else
+            log_info "Creating symlink: $SOURCE -> $DEST_FINAL"
+            # Get relative path for symlink if possible
+            if ln -s "$DEST_FINAL" "$SOURCE" 2>/dev/null; then
+                log_info "Symlink created successfully"
+            else
+                # Try with absolute path
+                ln -sf "$DEST_FINAL_ABS" "$SOURCE_ABS"
+                log_info "Symlink created successfully (absolute path)"
+            fi
+        fi
+    fi
+else
+    echo ""
+    log_info "Dry run complete - no changes were made"
+    if [[ "$MOVE" == true ]]; then
+        echo "  Would remove: $SOURCE"
+    fi
+    if [[ "$CREATE_SYMLINK" == true ]]; then
+        echo "  Would create symlink: $SOURCE -> $DEST_FINAL"
+    fi
+fi
+
+echo ""
+log_info "Done!"
