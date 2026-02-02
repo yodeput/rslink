@@ -17,6 +17,7 @@ CREATE_SYMLINK=true
 DELETE_AFTER=false
 DRY_RUN=false
 VERBOSE=false
+SHOW_PROGRESS=true
 RSYNC_OPTS="-a"
 
 show_help() {
@@ -33,6 +34,8 @@ OPTIONS:
     -d, --delete         Delete source after transfer (alias for --move)
     -n, --dry-run        Show what would be done without making changes
     -v, --verbose        Show detailed output
+    --progress           Show transfer progress (default: enabled)
+    --no-progress        Disable progress display
     -h, --help           Show this help message
 
 EXAMPLES:
@@ -69,6 +72,38 @@ log_verbose() {
     fi
 }
 
+# Format bytes to human readable
+format_bytes() {
+    local bytes=$1
+    if [[ $bytes -lt 1024 ]]; then
+        echo "${bytes}B"
+    elif [[ $bytes -lt 1048576 ]]; then
+        echo "$((bytes / 1024))KB"
+    elif [[ $bytes -lt 1073741824 ]]; then
+        echo "$((bytes / 1048576))MB"
+    elif [[ $bytes -lt 1099511627776 ]]; then
+        echo "$((bytes / 1073741824))GB"
+    else
+        echo "$((bytes / 1099511627776))TB"
+    fi
+}
+
+# Get directory size
+get_dir_size() {
+    local path="$1"
+    if [[ -d "$path" ]]; then
+        du -sb "$path" 2>/dev/null | cut -f1 || echo "0"
+    else
+        stat -f%z "$path" 2>/dev/null || stat -c%s "$path" 2>/dev/null || echo "0"
+    fi
+}
+
+# Get file count
+get_file_count() {
+    local path="$1"
+    find "$path" -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -99,6 +134,14 @@ while [[ $# -gt 0 ]]; do
             RSYNC_OPTS="$RSYNC_OPTS -v"
             shift
             ;;
+        --progress)
+            SHOW_PROGRESS=true
+            shift
+            ;;
+        --no-progress)
+            SHOW_PROGRESS=false
+            shift
+            ;;
         -*)
             log_error "Unknown option: $1"
             show_help
@@ -120,9 +163,15 @@ fi
 SOURCE="$1"
 DEST="$2"
 
+# Remove trailing slash from source for consistent behavior
+SOURCE="${SOURCE%/}"
+
 # Resolve absolute paths
 SOURCE_ABS="$(cd "$SOURCE" 2>/dev/null && pwd)" || SOURCE_ABS="$SOURCE"
-DEST_ABS="$(cd "$(dirname "$DEST")" 2>/dev/null && pwd)/$(basename "$DEST")" || DEST_ABS="$DEST"
+DEST_ABS="$(cd "$DEST" 2>/dev/null && pwd)" || {
+    # Try to resolve parent directory if destination doesn't exist yet
+    DEST_ABS="$(cd "$(dirname "$DEST")" 2>/dev/null && pwd)/$(basename "$DEST")"
+}
 
 # Validate source exists
 if [[ ! -e "$SOURCE" ]]; then
@@ -133,19 +182,27 @@ fi
 # Get source basename for destination
 SOURCE_BASENAME="$(basename "$SOURCE")"
 
-# If destination is a directory, append source basename
+# If destination is an existing directory, append source basename
 if [[ -d "$DEST" ]]; then
     DEST_FINAL="$DEST/$SOURCE_BASENAME"
 else
     DEST_FINAL="$DEST"
 fi
 
-DEST_FINAL_ABS="$(cd "$(dirname "$DEST_FINAL")" 2>/dev/null && pwd)/$(basename "$DEST_FINAL")" || DEST_FINAL="$DEST_FINAL"
+# Resolve absolute path for final destination
+DEST_PARENT="$(cd "$(dirname "$DEST_FINAL")" 2>/dev/null && pwd)"
+DEST_FINAL_ABS="$DEST_PARENT/$(basename "$DEST_FINAL")"
+
+# Calculate source size and file count
+SOURCE_SIZE=$(get_dir_size "$SOURCE")
+SOURCE_FILES=$(get_file_count "$SOURCE")
 
 # Show plan
 echo "────────────────────────────────────────────"
 echo "Source:      $SOURCE"
 echo "Destination: $DEST_FINAL"
+echo "Size:        $(format_bytes $SOURCE_SIZE)"
+echo "Files:       $SOURCE_FILES"
 echo "────────────────────────────────────────────"
 echo "Mode:        $([ "$MOVE" == true ] && echo "MOVE (delete source)" || echo "COPY")"
 echo "Symlink:     $([ "$CREATE_SYMLINK == true" ] && echo "Yes" || echo "No")"
@@ -154,13 +211,52 @@ echo "────────────────────────�
 
 # Run rsync
 log_info "Starting rsync..."
-log_verbose "Command: rsync $RSYNC_OPTS \"$SOURCE\" \"$DEST_FINAL\""
 
-if rsync $RSYNC_OPTS "$SOURCE" "$DEST_FINAL"; then
-    log_info "Rsync completed successfully"
+# Check if destination already exists
+if [[ -e "$DEST_FINAL" ]]; then
+    log_verbose "Destination exists, syncing contents..."
+    # Use trailing slash on source to sync contents into existing directory
+    RSYNC_SOURCE="$SOURCE/"
 else
-    log_error "Rsync failed"
-    exit 1
+    RSYNC_SOURCE="$SOURCE"
+fi
+
+# Build rsync command with progress if enabled
+RSYNC_CMD="rsync $RSYNC_OPTS"
+if [[ "$SHOW_PROGRESS" == true && "$VERBOSE" == false ]]; then
+    RSYNC_CMD="$RSYNC_CMD --info=progress2"
+fi
+
+log_verbose "Command: $RSYNC_CMD \"$RSYNC_SOURCE\" \"$DEST_FINAL\""
+
+# Run rsync and capture output
+if [[ "$SHOW_PROGRESS" == true && "$VERBOSE" == false ]]; then
+    # Show progress with pv or rsync progress
+    if $RSYNC_CMD "$RSYNC_SOURCE" "$DEST_FINAL" 2>&1 | while IFS= read -r line; do
+        if [[ "$line" =~ ([0-9]+) ]]; then
+            echo -ne "\r$line"
+        fi
+    done; then
+        echo ""  # New line after progress
+        log_info "Rsync completed successfully"
+    else
+        echo ""
+        log_error "Rsync failed"
+        exit 1
+    fi
+else
+    if $RSYNC_CMD "$RSYNC_SOURCE" "$DEST_FINAL"; then
+        log_info "Rsync completed successfully"
+    else
+        log_error "Rsync failed"
+        exit 1
+    fi
+fi
+
+# Calculate transferred size (if destination exists)
+if [[ -e "$DEST_FINAL" && "$DRY_RUN" == false ]]; then
+    DEST_SIZE=$(get_dir_size "$DEST_FINAL")
+    log_info "Transferred: $(format_bytes $DEST_SIZE)"
 fi
 
 # Handle move/delete and symlink creation
