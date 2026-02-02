@@ -18,14 +18,14 @@ A lightweight CLI tool that uses `rsync` to copy or move folders, with optional 
 ### Quick Install (macOS/Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yourusername/rslink/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/yodeput/rslink/main/install.sh | sh
 ```
 
 ### Manual Install
 
 ```bash
 # Download
-curl -fsSL https://raw.githubusercontent.com/yourusername/rslink/main/rslink -o /usr/local/bin/rslink
+curl -fsSL https://raw.githubusercontent.com/yodeput/rslink/main/rslink -o /usr/local/bin/rslink
 
 # Make executable
 chmod +x /usr/local/bin/rslink
@@ -34,7 +34,7 @@ chmod +x /usr/local/bin/rslink
 ### Homebrew
 
 ```bash
-brew tap yourusername/tap
+brew tap yodeput/tap
 brew install rslink
 ```
 

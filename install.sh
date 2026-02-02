@@ -6,7 +6,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-REPO="yourusername/rslink"
+REPO="yodeput/rslink"
 VERSION="main"
 BIN_NAME="rslink"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
